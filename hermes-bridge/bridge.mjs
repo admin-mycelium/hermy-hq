@@ -2,19 +2,23 @@
 /**
  * Hermy HQ ↔ Hermes bridge.
  *
- * Runs on the Mac mini where Hermes lives. Talks to the shared Postgres
- * (the same DATABASE_URL the website uses) — nothing is exposed to the
- * internet. Two jobs:
+ * Mycelium Hub first-slice patch (14 Aug 2026) — do not run the stock
+ * upstream file against Sporekeeper. This copy keeps read/mirror + hermes -z
+ * oneshots. It REFUSES vault/wiki writes, auto daily brief, cron mutations,
+ * and kanban create. Do not set HERMES_WIKI=/workspace/vault.
  *
- *   PULL  (Hermes → website): mirror the kanban board into HermesTask,
- *         cron list + health into DataStore, and emit activity events.
- *   PUSH  (website → Hermes): pick up AgentRequest rows that are `queued`
- *         (safe) or `approved` (human-approved side-effecting), run them
- *         through the `hermes` CLI, and write results back.
+ * Runs next to Hermes. Talks to the shared Postgres (the same DATABASE_URL
+ * the website uses) — nothing is exposed to the internet. Two jobs:
  *
- * Requires: the `hermes` binary on PATH, and env DATABASE_URL.
+ * PULL (Hermes → website): mirror the kanban board into HermesTask,
+ * cron list + health into DataStore, and emit activity events.
+ * PUSH (website → Hermes): pick up AgentRequest rows that are `queued`
+ * (safe) or `approved` (human-approved side-effecting), run them
+ * through the `hermes` CLI, and write results back.
+ *
+ * Requires: the `hermes` binary (or a wrapper) via HERMES_BIN, and env DATABASE_URL.
  * Optional env: HERMES_BOARD (default "default"), BRIDGE_POLL_MS (5000),
- *               BRIDGE_MIRROR_MS (30000), HERMES_BIN (default "hermes").
+ * BRIDGE_MIRROR_MS (30000), HERMES_BIN (default "hermes").
  */
 import pg from "pg";
 import { execFile } from "node:child_process";
@@ -31,7 +35,21 @@ const POLL_MS = Number(process.env.BRIDGE_POLL_MS || 5000);
 const MIRROR_MS = Number(process.env.BRIDGE_MIRROR_MS || 30000);
 const RUN_TIMEOUT_MS = Number(process.env.BRIDGE_RUN_TIMEOUT_MS || 240000);
 const WIKI_DIR = process.env.HERMES_WIKI || path.join(os.homedir(), ".hermes", "wiki");
-const BRIEF_HOUR = Number(process.env.BRIEF_HOUR || 8);   // local hour to auto-generate the daily brief
+// First slice: never auto-fire an unattended hermes -z. Leave BRIEF_HOUR unset.
+const BRIEF_HOUR = process.env.BRIEF_HOUR === undefined || process.env.BRIEF_HOUR === ""
+  ? null
+  : Number(process.env.BRIEF_HOUR);
+const FIRST_SLICE = process.env.HERMY_HQ_FIRST_SLICE !== "false";
+const REFUSED_KINDS = new Set([
+  "memory.write",
+  "kanban",
+  "cron.create",
+  "cron.edit",
+  "cron.remove",
+  "cron.run",
+  "cron.pause",
+  "cron.resume",
+]);
 const BRIEF_PROMPT =
   "You are the operator's chief of staff. Produce today's brief. Read your memory wiki open-loops " +
   "(~/.hermes/wiki), the kanban board, and recent activity. Output ONLY valid JSON (no prose, no code fences) " +
@@ -53,6 +71,16 @@ const pool = new pg.Pool({ connectionString: DB_URL, max: 4, ssl: isLocal ? unde
 
 const log = (...a) => console.log(new Date().toISOString(), ...a);
 const q = (text, params) => pool.query(text, params);
+
+function refusedReason(kind) {
+  if (!FIRST_SLICE) return null;
+  if (kind === "memory.write") return "first-slice refuse: memory.write (would write+commit wiki/vault)";
+  if (kind === "kanban") return "first-slice refuse: kanban create (await live CLI confirm)";
+  if (kind === "briefing.generate") return null; // explicit operator action only; auto-brief is disabled
+  if (kind.startsWith("cron.")) return `first-slice refuse: ${kind} (no production cron mutation / Trigger now)`;
+  if (REFUSED_KINDS.has(kind)) return `first-slice refuse: ${kind}`;
+  return null;
+}
 
 async function hermes(args, { timeout = 30000 } = {}) {
   const { stdout } = await execFileP(HERMES, args, { timeout, maxBuffer: 8 * 1024 * 1024 });
@@ -97,8 +125,8 @@ async function mirrorKanban() {
          title=EXCLUDED.title, assignee=EXCLUDED.assignee, status=EXCLUDED.status,
          priority=EXCLUDED.priority, result=EXCLUDED.result, "syncedAt"=now()`,
       [id, BOARD, String(t.title ?? "untitled").slice(0, 300), t.assignee ?? null,
-       String(t.status ?? "todo"), t.priority != null ? Number(t.priority) : null,
-       t.result ? String(t.result).slice(0, 2000) : null]
+        String(t.status ?? "todo"), t.priority != null ? Number(t.priority) : null,
+        t.result ? String(t.result).slice(0, 2000) : null]
     );
   }
   // prune tasks that vanished from the board
@@ -181,35 +209,18 @@ async function mirrorWiki() {
          tags=EXCLUDED.tags, links=EXCLUDED.links, body=EXCLUDED.body,
          "validFrom"=EXCLUDED."validFrom", "validTo"=EXCLUDED."validTo", "syncedAt"=now()`,
       [id, rel, fm.type || "fact", fm.title || id, fm.status || "active", fm.confidence || null,
-       fm.provenance || null, Array.isArray(fm.tags) ? fm.tags : [], Array.isArray(fm.links) ? fm.links : [],
-       body, fm.valid_from || null, fm.valid_to || null]
+        fm.provenance || null, Array.isArray(fm.tags) ? fm.tags : [], Array.isArray(fm.links) ? fm.links : [],
+        body, fm.valid_from || null, fm.valid_to || null]
     );
   }
   if (seen.size) await q(`DELETE FROM "HermesMemory" WHERE id <> ALL($1::text[])`, [[...seen]]);
   else await q(`DELETE FROM "HermesMemory"`);
 }
 function writeWikiEntry(e) {
-  const rel = e.path || `${e.type || "note"}s/${e.id}.md`;
-  const full = path.join(WIKI_DIR, rel);
-  fs.mkdirSync(path.dirname(full), { recursive: true });
-  const now = new Date().toISOString().slice(0, 10);
-  const lines = [
-    "---", `id: ${e.id}`, `type: ${e.type || "note"}`, `title: ${e.title}`,
-    `status: ${e.status || "active"}`,
-    e.confidence ? `confidence: ${e.confidence}` : null,
-    `provenance: ${e.provenance || "dashboard"}`,
-    `tags: [${(e.tags || []).join(", ")}]`, `links: [${(e.links || []).join(", ")}]`,
-    `updated: ${now}`, "---", "", e.body || "", "",
-  ].filter((l) => l !== null);
-  fs.writeFileSync(full, lines.join("\n"), "utf8");
-  return rel;
+  throw new Error("first-slice refuse: writeWikiEntry disabled");
 }
 async function gitCommitWiki(msg) {
-  try {
-    if (!fs.existsSync(path.join(WIKI_DIR, ".git"))) await execFileP("git", ["-C", WIKI_DIR, "init"]).catch(() => {});
-    await execFileP("git", ["-C", WIKI_DIR, "add", "-A"]).catch(() => {});
-    await execFileP("git", ["-C", WIKI_DIR, "commit", "-m", msg]).catch(() => {});
-  } catch { /* ignore */ }
+  throw new Error("first-slice refuse: gitCommitWiki disabled");
 }
 
 /* ─────────────── Chief-of-staff daily brief ─────────────── */
@@ -226,6 +237,8 @@ async function generateBriefing() {
   await emit("status", "Daily brief generated", { level: "up" });
 }
 async function maybeDailyBrief() {
+  // First slice: never auto-generate. Manual briefing.generate still works if queued/approved.
+  if (BRIEF_HOUR == null || Number.isNaN(BRIEF_HOUR)) return;
   const now = new Date();
   const today = now.toISOString().slice(0, 10);
   if (now.getHours() >= BRIEF_HOUR && lastBriefDate !== today) {
@@ -239,31 +252,18 @@ async function runRequest(r) {
   await q(`UPDATE "AgentRequest" SET status='running', "startedAt"=now(), "updatedAt"=now() WHERE id=$1`, [r.id]);
   await emit("run", `Started: ${r.title}`, { level: "info", meta: { requestId: r.id, kind: r.kind } });
   try {
+    const blocked = refusedReason(r.kind);
+    if (blocked) throw new Error(blocked);
+
     let result = "";
     if (r.kind === "oneshot" || r.kind === "chat") {
       result = (await hermes(["-z", r.prompt || r.title], { timeout: RUN_TIMEOUT_MS })).trim();
     } else if (r.kind === "kanban") {
-      result = (await hermes(["kanban", "--board", BOARD, "create", "--json", r.title], { timeout: 20000 })).trim();
+      throw new Error("first-slice refuse: kanban create");
     } else if (r.kind.startsWith("cron.")) {
-      const op = r.kind.split(".")[1];
-      const a = JSON.parse(r.prompt || "{}");
-      const argv =
-        op === "create" ? ["cron", "create", a.schedule, a.prompt || a.name].filter(Boolean)
-        : op === "run"    ? ["cron", "run", a.id || a.name]
-        : op === "pause"  ? ["cron", "pause", a.id || a.name]
-        : op === "resume" ? ["cron", "resume", a.id || a.name]
-        : op === "remove" ? ["cron", "remove", a.id || a.name]
-        : op === "edit"   ? ["cron", "edit", a.id || a.name]
-        : null;
-      if (!argv) throw new Error(`unknown cron op ${op}`);
-      result = (await hermes(argv, { timeout: 20000 })).trim();
-      await mirrorCrons();
+      throw new Error(`first-slice refuse: ${r.kind}`);
     } else if (r.kind === "memory.write") {
-      const e = JSON.parse(r.prompt || "{}");
-      const rel = writeWikiEntry(e);
-      await gitCommitWiki(`wiki: update ${rel} (via dashboard)`);
-      await mirrorWiki();
-      result = `wrote ${rel}`;
+      throw new Error("first-slice refuse: memory.write");
     } else if (r.kind === "briefing.generate") {
       await generateBriefing();
       lastBriefDate = new Date().toISOString().slice(0, 10);
@@ -294,17 +294,22 @@ async function mirrorTick() {
   try { await mirrorKanban(); } catch (e) { log("mirrorKanban err", e.message); }
   try { await mirrorCrons(); } catch (e) { log("mirrorCrons err", e.message); }
   try { await mirrorHealth(); } catch (e) { log("mirrorHealth err", e.message); }
-  try { await mirrorWiki(); } catch (e) { log("mirrorWiki err", e.message); }
+  // First slice: do not walk a wiki/vault into Neon. mirrorWiki no-ops if the dir is absent;
+  // we still skip the call unless HERMES_WIKI is explicitly set later.
+  if (!FIRST_SLICE) {
+    try { await mirrorWiki(); } catch (e) { log("mirrorWiki err", e.message); }
+  }
   try { await mirrorCost(); } catch (e) { log("mirrorCost err", e.message); }
-  try { await maybeDailyBrief(); } catch (e) { log("maybeDailyBrief err", e.message); }
+  if (!FIRST_SLICE) {
+    try { await maybeDailyBrief(); } catch (e) { log("maybeDailyBrief err", e.message); }
+  }
 }
 
 async function main() {
-  log(`hermes-bridge up · board=${BOARD} · poll=${POLL_MS}ms · mirror=${MIRROR_MS}ms`);
+  log(`hermes-bridge up · firstSlice=${FIRST_SLICE} · board=${BOARD} · poll=${POLL_MS}ms · mirror=${MIRROR_MS}ms`);
   await emit("status", "Bridge connected", { level: "up" });
   await mirrorTick();
   setInterval(() => mirrorTick().catch((e) => log("mirror loop", e.message)), MIRROR_MS);
-  // queue loop
   const tick = async () => { try { await processQueue(); } catch (e) { log("queue loop", e.message); } finally { setTimeout(tick, POLL_MS); } };
   tick();
 }
