@@ -451,8 +451,22 @@ export default function Dashboard() {
   const [loaded, setLoaded] = useState(false);
   const [mounted, setMounted] = useState(false);
   const [score, setScore] = useState<ScoreData | null>(null);
+  const [operatorName, setOperatorName] = useState(
+  process.env.NEXT_PUBLIC_OWNER_NAME || "Founder",
+  );
 
   useEffect(() => { setMounted(true); }, []);
+  useEffect(() => {
+  fetch("/api/auth/session")
+    .then((r) => (r.ok ? r.json() : null))
+    .then((s) => {
+      const name = typeof s?.user?.name === "string" ? s.user.name.trim() : "";
+      const email = typeof s?.user?.email === "string" ? s.user.email : "";
+      if (name) setOperatorName(name.split(/\s+/)[0]);
+      else if (email) setOperatorName(email.split("@")[0]);
+    })
+    .catch(() => {});
+  }, []);
   useEffect(() => {
     fetch("/api/score").then(r => r.ok ? r.json() : null).then(d => { if (d) setScore(d); }).catch(() => {});
   }, []);
@@ -490,7 +504,7 @@ export default function Dashboard() {
         <div className="hq-rise pt-4 pb-10 flex flex-wrap items-end justify-between gap-6" style={rise(0)}>
           <div>
             <div className="eyebrow mb-2.5">{greeting()}</div>
-            <h1 className="text-[40px] font-semibold tracking-[-0.025em] leading-none text-[var(--hq-text)]">{process.env.NEXT_PUBLIC_OWNER_NAME || "Founder"}</h1>
+            <h1 className="text-[40px] font-semibold tracking-[-0.025em] leading-none text-[var(--hq-text)]">{operatorName}</h1>
             <p className="num text-[var(--hq-text-ghost)] text-[12.5px] mt-3">
               {time.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })}
               {"  ·  "}
