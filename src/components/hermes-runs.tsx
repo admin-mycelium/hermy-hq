@@ -77,9 +77,10 @@ function fmtTokens(n: number): string {
   return n.toLocaleString("en-US");
 }
 function fmtUsd(n: number): string {
-  return `$${n.toLocaleString("en-US", {
-    minimumFractionDigits: n < 100 ? 2 : 0,
-    maximumFractionDigits: n < 100 ? 2 : 0,
+  const digits = n > 0 && n < 0.01 ? 4 : n < 100 ? 2 : 0;
+  return `~$${n.toLocaleString("en-US", {
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
   })}`;
 }
 
@@ -154,9 +155,16 @@ function StatusDot({ status, reduce }: { status: RunStatus; reduce: boolean }) {
 // ── Usage strip ───────────────────────────────────────────
 function UsageStrip({ cost }: { cost: Cost | null }) {
   const byModel = cost?.byModel ?? [];
+  const rawSummary = cost?.summary?.replace(/\s+/g, " ").trim() ?? "";
+  const safeSummary =
+    rawSummary.length > 0 &&
+    rawSummary.length <= 240 &&
+    !rawSummary.includes("Hermes Insights")
+      ? rawSummary
+      : "";
   const hasAny =
     !!cost &&
-    (!!cost.summary ||
+    (!!safeSummary ||
       byModel.length > 0 ||
       cost.totalCost != null ||
       cost.totalTokens != null);
@@ -180,7 +188,7 @@ function UsageStrip({ cost }: { cost: Cost | null }) {
     <Panel className="p-5">
       <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
         <div>
-          <Eyebrow>Total cost</Eyebrow>
+          <Eyebrow>Estimated cost</Eyebrow>
           <div className="num font-semibold text-[26px] tracking-[-0.02em] text-[var(--text)] leading-none mt-2">
             {cost?.totalCost != null ? fmtUsd(cost.totalCost) : "—"}
           </div>
@@ -199,9 +207,9 @@ function UsageStrip({ cost }: { cost: Cost | null }) {
         </div>
       </div>
 
-      {cost?.summary && (
-        <p className="mt-4 text-[12.5px] text-[var(--text-2)] leading-snug">
-          {cost.summary}
+      {safeSummary && (
+        <p className="mt-4 break-words text-[12.5px] text-[var(--text-2)] leading-snug">
+          {safeSummary}
         </p>
       )}
 
@@ -399,7 +407,7 @@ export function HermesRuns() {
   useEffect(() => {
     mounted.current = true;
     load();
-    const iv = setInterval(load, 8000);
+    const iv = setInterval(load, 60_000);
     return () => {
       mounted.current = false;
       clearInterval(iv);

@@ -778,7 +778,7 @@ export default function HermesPage() {
 
   useEffect(() => {
     load();
-    const iv = setInterval(load, 8000);
+    const iv = setInterval(load, 60_000);
     return () => clearInterval(iv);
   }, [load]);
 

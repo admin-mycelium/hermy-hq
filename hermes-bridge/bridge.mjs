@@ -145,11 +145,69 @@ async function mirrorCrons() {
   } catch (e) { log("cron list failed:", e.message.split("\n")[0]); }
 }
 
+function parseInsights(out) {
+  const clean = out
+    .replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "")
+    .replace(/\r/g, "");
+
+  const parseNumber = (value) => Number(value.replace(/,/g, ""));
+  const readNumber = (pattern) => {
+    const match = clean.match(pattern);
+    return match ? parseNumber(match[1]) : null;
+  };
+
+  const totalTokens = readNumber(/Total tokens:\s*([\d,]+)/i);
+  const totalCost = readNumber(/Estimated:\s*~?\$([\d,.]+)/i);
+  const includedSessions = readNumber(/Included:\s*([\d,]+)\s+session/i);
+  const unknownSessions = readNumber(/Unknown:\s*([\d,]+)\s+session/i);
+
+  const byModel = [];
+  const modelStart = clean.indexOf("🤖 Models Used");
+  const modelEnd = modelStart >= 0
+    ? clean.indexOf("📱 Platforms", modelStart)
+    : -1;
+  const modelBlock = modelStart >= 0
+    ? clean.slice(modelStart, modelEnd >= 0 ? modelEnd : undefined)
+    : "";
+
+  for (const rawLine of modelBlock.split("\n")) {
+    const match = rawLine.trim().match(/^(.+?)\s+([\d,]+)\s+([\d,]+)$/);
+    if (!match) continue;
+    byModel.push({
+      model: match[1].trim(),
+      tokens: parseNumber(match[3]),
+    });
+  }
+
+  const summary = [
+    includedSessions != null
+      ? `${includedSessions.toLocaleString("en-US")} subscription-included`
+      : null,
+    unknownSessions != null
+      ? `${unknownSessions.toLocaleString("en-US")} unknown pricing`
+      : null,
+  ].filter(Boolean).join(" · ");
+
+  return {
+    summary: summary || "Usage synced; structured pricing details unavailable.",
+    byModel,
+    totalCost,
+    totalTokens,
+  };
+}
+
 async function mirrorCost() {
   for (const args of [["insights", "--days", "7"], ["insights"]]) {
     try {
       const out = await hermes(args, { timeout: 15000 });
-      await setStore("hermes-cost", { summary: out.slice(0, 4000), syncedAt: new Date().toISOString() });
+      const parsed = parseInsights(out);
+      if (parsed.totalTokens == null) {
+        log("mirrorCost parse warning: total tokens not found");
+      }
+      await setStore("hermes-cost", {
+        ...parsed,
+        syncedAt: new Date().toISOString(),
+      });
       return;
     } catch { /* try next arg shape */ }
   }
