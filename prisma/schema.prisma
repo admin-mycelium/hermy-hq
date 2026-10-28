@@ -449,6 +449,9 @@ model ClientPulseAlert {
 // mirrors kanban tasks + activity back into HermesTask / AgentEvent.
 
 model AgentRequest {
+  instanceId    String?
+  profileId     String?
+  requestKey    String? @unique
   id            String    @id @default(cuid())
   origin        String    @default("web")     // "web" | "hermes"
   kind          String    @default("oneshot") // "oneshot" | "kanban" | "chat"
