@@ -5,6 +5,8 @@ import { usePathname } from "next/navigation";
 import { useState, useEffect } from "react";
 import {
   Home,
+  Server,
+  FlaskConical,
   Twitter,
   Play,
   Bot,
@@ -25,7 +27,9 @@ const navGroups = [
     name: "Overview",
     items: [
       { href: "/", label: "Dashboard", icon: Home },
-      { href: "/hermes", label: "Hermes", icon: Cpu },
+      { href: "/fleet", label: "Fleet", icon: Server },
+      { href: "/trader-labs", label: "Trader Labs", icon: FlaskConical },
+      { href: "/hermes", label: "Sporekeeper", icon: Cpu },
       { href: "/tasks", label: "Tasks", icon: ClipboardList },
     ],
   },
@@ -224,7 +228,7 @@ export function Sidebar() {
               <span className="absolute inline-flex h-full w-full rounded-full bg-[var(--up)] opacity-60 animate-ping" />
               <span className="relative inline-flex w-1.5 h-1.5 rounded-full bg-[var(--up)]" />
             </span>
-            <span>All systems online</span>
+            <span>Hermy HQ workspace</span>
           </div>
         </div>
       </aside>
