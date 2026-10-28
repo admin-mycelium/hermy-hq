@@ -40,6 +40,8 @@ type ReqStatus =
 interface Req {
   id: string;
   origin: string;
+  instanceId?: string | null;
+  profileId?: string | null;
   kind: string;
   title: string;
   prompt: string | null;
@@ -191,7 +193,9 @@ function HealthChip({ health }: { health: Health | null }) {
 // ── Dispatch bar ──────────────────────────────────────────
 function DispatchBar({ onDone }: { onDone: () => void }) {
   const [text, setText] = useState("");
-  const [side, setSide] = useState(false);
+  const side = true;
+  const [commandEnabled,setCommandEnabled]=useState(false);
+  useEffect(()=>{fetch('/api/hermes/dispatch').then(r=>r.ok?r.json():null).then(r=>setCommandEnabled(r?.enabled===true)).catch(()=>{});},[]);
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -211,7 +215,7 @@ function DispatchBar({ onDone }: { onDone: () => void }) {
       const r = await fetch("/api/hermes/dispatch", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ kind: "oneshot", title, sideEffecting: side }),
+        body: JSON.stringify({ kind: "oneshot", title, sideEffecting: side, instanceId: "sporekeeper", profileId: "default", requestKey: crypto.randomUUID() }),
       });
       if (r.ok) {
         setText("");
@@ -222,10 +226,10 @@ function DispatchBar({ onDone }: { onDone: () => void }) {
         );
         onDone();
       } else {
-        flash("Dispatch failed. Try again.");
+        flash("Request not accepted. Refresh and check the approval inbox before retrying.");
       }
     } catch {
-      flash("Dispatch failed. Try again.");
+      flash("Request not accepted. Refresh and check the approval inbox before retrying.");
     } finally {
       setBusy(false);
     }
@@ -240,35 +244,12 @@ function DispatchBar({ onDone }: { onDone: () => void }) {
           onKeyDown={(e) => {
             if (e.key === "Enter") { e.preventDefault(); submit(); }
           }}
-          placeholder="Ask or tell Hermes to do something…"
+          placeholder="Request work from Sporekeeper/default…"
           className="flex-1 min-w-0 bg-transparent text-[14px] text-[var(--text)] placeholder:text-[var(--text-3)] px-3.5 py-2.5 rounded-[10px] border border-[var(--line)] focus:border-[color-mix(in_srgb,var(--accent)_45%,transparent)] outline-none transition-colors"
         />
         <div className="flex items-center gap-3 shrink-0">
-          <button
-            type="button"
-            onClick={() => setSide((s) => !s)}
-            aria-pressed={side}
-            className="flex items-center gap-2 select-none"
-          >
-            <span
-              className="relative inline-flex h-[18px] w-[32px] rounded-full transition-colors"
-              style={{
-                background: side
-                  ? "color-mix(in srgb, var(--warn) 55%, transparent)"
-                  : "var(--surface-2)",
-                border: "1px solid var(--line)",
-              }}
-            >
-              <span
-                className="absolute top-[1px] h-[14px] w-[14px] rounded-full bg-[var(--text)] transition-all"
-                style={{ left: side ? "15px" : "1px" }}
-              />
-            </span>
-            <span className="text-[12px] font-medium text-[var(--text-2)]">
-              side-effecting?
-            </span>
-          </button>
-          <Button variant="primary" onClick={submit} disabled={busy || !text.trim()}>
+          <span className="text-sm text-[var(--text-2)]">sporekeeper/default · {commandEnabled ? "human approval required" : "commands unavailable pending routing acceptance"}</span>
+          <Button variant="primary" onClick={submit} disabled={!commandEnabled || busy || !text.trim()}>
             <Send className="w-3.5 h-3.5" />
             Dispatch
           </Button>
@@ -312,7 +293,7 @@ function InboxCard({ req, onAction }: { req: Req; onAction: () => void }) {
     <Panel className={`p-5 ${busy ? "opacity-50 pointer-events-none" : ""}`}>
       <div className="flex items-start justify-between gap-3 mb-2.5">
         <div className="flex items-center gap-2 flex-wrap">
-          <Pill tone="neutral">{req.kind}</Pill>
+          <Pill tone="neutral">{req.instanceId ?? "unqualified"}/{req.profileId ?? "unqualified"} · {req.kind}</Pill>
           {req.sideEffecting && <Pill tone="warn">side-effecting</Pill>}
         </div>
         <span className="num text-[10.5px] text-[var(--text-3)] shrink-0 mt-1">
@@ -514,171 +495,10 @@ type CronJob = {
   nextRun: string | null; lastRun: string | null; lastResult: string | null;
   deliver: string | null; skills: string | null; script: string | null; mode: string | null;
 };
-function CronPanel({ jobs, syncedAt, onDone }: { jobs: CronJob[]; syncedAt: string | null; onDone: () => void }) {
-  const [schedule, setSchedule] = useState("");
-  const [prompt, setPrompt] = useState("");
-  const [runName, setRunName] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [note, setNote] = useState<string | null>(null);
-
-  const post = async (body: Record<string, unknown>, ok: string) => {
-    setBusy(true);
-    try {
-      const r = await fetch("/api/hermes/crons", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      setNote(r.ok ? ok : "Request failed.");
-      if (r.ok) onDone();
-    } catch {
-      setNote("Request failed.");
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const create = () => {
-    if (!schedule.trim() || !prompt.trim()) return;
-    post(
-      { op: "create", schedule: schedule.trim(), prompt: prompt.trim() },
-      "Schedule sent to Hermes."
-    ).then(() => {
-      setSchedule("");
-      setPrompt("");
-    });
-  };
-  const runNow = () => {
-    if (!runName.trim()) return;
-    post({ op: "run", name: runName.trim() }, "Run-now sent to Hermes.").then(() =>
-      setRunName("")
-    );
-  };
-
-  return (
-    <>
-      <SectionHeader
-        label="Cron · schedules"
-        title="Recurring jobs"
-        action={
-          <span className="num text-[11px] text-[var(--text-3)]">
-            synced {timeAgo(syncedAt)}
-          </span>
-        }
-      />
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        {/* Schedules */}
-        <Panel className="p-5">
-          <div className="flex items-center justify-between mb-3">
-            <Eyebrow>schedules</Eyebrow>
-            <span className="num text-[10.5px] text-[var(--text-3)]">
-              {jobs.length} job{jobs.length === 1 ? "" : "s"}
-            </span>
-          </div>
-          {jobs.length === 0 ? (
-            <p className="text-[13px] text-[var(--text-3)] py-6 text-center">
-              No schedules yet.
-            </p>
-          ) : (
-            <div className="flex flex-col gap-2 max-h-[440px] overflow-auto -mx-1 px-1">
-              {jobs.map((j) => {
-                const active = j.status === "active";
-                return (
-                  <div key={j.id} className="rounded-[10px] border border-[var(--line)] bg-[var(--surface-2)] p-3">
-                    <div className="flex items-start gap-2.5">
-                      <span className="mt-1.5 w-1.5 h-1.5 rounded-full shrink-0" style={{ background: active ? "var(--up)" : "var(--text-3)" }} title={j.status} />
-                      <div className="flex-1 min-w-0">
-                        <p className="text-[13px] font-medium text-[var(--text)] truncate">{j.name || j.id}</p>
-                        <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 mt-1 num text-[11px] text-[var(--text-3)]">
-                          <span className="text-[var(--text-2)]">{j.schedule}</span>
-                          {j.nextRun && <span>next {timeAgo(j.nextRun)}</span>}
-                          {j.deliver && <span>→ {j.deliver.split(":")[0]}</span>}
-                          {j.skills && <span>{j.skills}</span>}
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-1 shrink-0">
-                        <button title="Run now" disabled={busy} onClick={() => post({ op: "run", id: j.id, name: j.name }, "Run-now sent.")} className="p-1.5 rounded-md text-[var(--text-3)] hover:text-[var(--accent)] hover:bg-[var(--surface-1)] transition-colors">
-                          <Zap className="w-3.5 h-3.5" />
-                        </button>
-                        {active ? (
-                          <button title="Pause" disabled={busy} onClick={() => post({ op: "pause", id: j.id, name: j.name }, "Pause sent.")} className="p-1.5 rounded-md text-[var(--text-3)] hover:text-[var(--warn)] hover:bg-[var(--surface-1)] transition-colors">
-                            <Pause className="w-3.5 h-3.5" />
-                          </button>
-                        ) : (
-                          <button title="Resume" disabled={busy} onClick={() => post({ op: "resume", id: j.id, name: j.name }, "Resume sent.")} className="p-1.5 rounded-md text-[var(--text-3)] hover:text-[var(--up)] hover:bg-[var(--surface-1)] transition-colors">
-                            <Play className="w-3.5 h-3.5" />
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </Panel>
-
-        {/* Controls */}
-        <Panel className="p-5">
-          <div className="space-y-4">
-            <div>
-              <Eyebrow className="!mb-2 block">New schedule</Eyebrow>
-              <div className="space-y-2.5">
-                <input
-                  value={schedule}
-                  onChange={(e) => setSchedule(e.target.value)}
-                  placeholder="Schedule (e.g. 0 9 * * 1)"
-                  className="w-full bg-transparent num text-[13px] text-[var(--text)] placeholder:text-[var(--text-3)] px-3 py-2 rounded-[8px] border border-[var(--line)] outline-none focus:border-[color-mix(in_srgb,var(--accent)_45%,transparent)]"
-                />
-                <textarea
-                  value={prompt}
-                  onChange={(e) => setPrompt(e.target.value)}
-                  rows={2}
-                  placeholder="Prompt — what should Hermes do on this cadence?"
-                  className="w-full bg-transparent text-[13px] text-[var(--text-2)] placeholder:text-[var(--text-3)] px-3 py-2 rounded-[8px] border border-[var(--line)] outline-none focus:border-[color-mix(in_srgb,var(--accent)_45%,transparent)] resize-y"
-                />
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={create}
-                  disabled={busy || !schedule.trim() || !prompt.trim()}
-                >
-                  <Clock className="w-3.5 h-3.5" />
-                  Create schedule
-                </Button>
-              </div>
-            </div>
-
-            <div className="rule" />
-
-            <div>
-              <Eyebrow className="!mb-2 block">Run now</Eyebrow>
-              <div className="flex items-center gap-2.5">
-                <input
-                  value={runName}
-                  onChange={(e) => setRunName(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); runNow(); } }}
-                  placeholder="Job name"
-                  className="flex-1 min-w-0 bg-transparent text-[13px] text-[var(--text)] placeholder:text-[var(--text-3)] px-3 py-2 rounded-[8px] border border-[var(--line)] outline-none focus:border-[color-mix(in_srgb,var(--accent)_45%,transparent)]"
-                />
-                <Button variant="ghost" size="sm" onClick={runNow} disabled={busy || !runName.trim()}>
-                  <Zap className="w-3.5 h-3.5" />
-                  Run now
-                </Button>
-              </div>
-            </div>
-
-            {note && (
-              <p className="text-[12px] text-[var(--text-2)] flex items-center gap-1.5">
-                <Check className="w-3.5 h-3.5" style={{ color: "var(--up)" }} />
-                {note}
-              </p>
-            )}
-          </div>
-        </Panel>
-      </div>
-    </>
-  );
+function CronPanel({ jobs, syncedAt }: { jobs: CronJob[]; syncedAt: string | null; onDone: () => void }) {
+  return <><SectionHeader label="Sporekeeper/default · read-only schedules" title="Recurring jobs"/>
+    <Panel className="p-5"><p className="text-sm text-[var(--text-2)] mb-4">Synced {timeAgo(syncedAt)}. Cron changes and trigger-now are unavailable in HQ.</p>
+    <div className="space-y-3">{jobs.map(j=><div key={j.id} className="rounded-lg border border-[var(--line)] p-3"><p>{j.name||j.id}</p><p className="text-sm text-[var(--text-2)]">{j.status} · {j.schedule}</p></div>)}</div></Panel></>;
 }
 
 // ── Activity feed ─────────────────────────────────────────
@@ -794,9 +614,9 @@ export default function HermesPage() {
         {/* Header */}
         <div className="hq-rise pt-4 pb-8 flex items-end justify-between gap-4">
           <div>
-            <Eyebrow>Agent runtime</Eyebrow>
+            <Eyebrow>Legacy cockpit · sporekeeper / default</Eyebrow>
             <h1 className="mt-2.5 text-[40px] font-semibold tracking-[-0.025em] leading-none text-[var(--text)]">
-              Hermes
+              Sporekeeper
             </h1>
           </div>
           <div className="flex items-center gap-2.5">

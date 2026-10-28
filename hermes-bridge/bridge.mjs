@@ -307,7 +307,15 @@ async function maybeDailyBrief() {
 
 /* ─────────────── PUSH: run website requests via Hermes ─────────────── */
 async function runRequest(r) {
-  await q(`UPDATE "AgentRequest" SET status='running', "startedAt"=now(), "updatedAt"=now() WHERE id=$1`, [r.id]);
+  // No implicit default fall-through. Only an explicit, human-approved current request can run.
+  const validTarget = r.instanceId === "sporekeeper" && r.profileId === "default" && r.kind === "oneshot";
+  const age = r.decidedAt ? Date.now() - new Date(r.decidedAt).getTime() : Infinity;
+  if (!validTarget || r.status !== "approved" || age < 0 || age > 30 * 60 * 1000) {
+    await q(`UPDATE "AgentRequest" SET status='failed', error='unsupported, unapproved or expired target', "finishedAt"=now(), "updatedAt"=now() WHERE id=$1 AND status IN ('queued','approved')`, [r.id]);
+    return;
+  }
+  const claimed = await q(`UPDATE "AgentRequest" SET status='running', "startedAt"=now(), "updatedAt"=now() WHERE id=$1 AND status='approved' AND "instanceId"='sporekeeper' AND "profileId"='default' AND "updatedAt"=$2 RETURNING id`, [r.id,r.updatedAt]);
+  if (!claimed.rowCount) return;
   await emit("run", `Started: ${r.title}`, { level: "info", meta: { requestId: r.id, kind: r.kind } });
   try {
     const blocked = refusedReason(r.kind);
@@ -315,7 +323,7 @@ async function runRequest(r) {
 
     let result = "";
     if (r.kind === "oneshot" || r.kind === "chat") {
-      result = (await hermes(["-z", r.prompt || r.title], { timeout: RUN_TIMEOUT_MS })).trim();
+      result = (await hermes(["--profile", "default", "-z", r.prompt || r.title], { timeout: RUN_TIMEOUT_MS })).trim();
     } else if (r.kind === "kanban") {
       throw new Error("first-slice refuse: kanban create");
     } else if (r.kind.startsWith("cron.")) {
